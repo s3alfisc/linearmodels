@@ -27,6 +27,14 @@ be added to 7.1. 7.2 also contains the fixes below.
   estimators (:issue:`823`, :issue:`850`, :issue:`870`).
 - ``fit`` of ``IV2SLS`` and ``IVLIML`` decomposes the instruments once instead of three
   times (:issue:`870`).
+- ``AbsorbingLS.fit`` accepts ``method="within"``, which absorbs the variables using
+  `within <https://github.com/py-econometrics/within>`_, a preconditioned LSMR solver
+  for fixed effects written in Rust. It is an optional dependency (``pip install
+  linearmodels[within]`` or ``pip install within-py``). It absorbs categorical effects,
+  continuous variables and interactions in weighted and unweighted models, and its
+  options ``tol``, ``maxiter``, ``local_size`` and ``preconditioner`` are passed using
+  ``absorb_options``. ``method="auto"`` uses it when it is installed and
+  ``absorb_options`` is empty, and otherwise uses HDFE or LSMR as before.
 
 .. rubric:: Changes that alter results
 

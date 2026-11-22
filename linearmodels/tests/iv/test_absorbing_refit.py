@@ -285,6 +285,8 @@ def test_cache_identifies_options(data, monkeypatch):
         return original(*args, **kwargs)
 
     monkeypatch.setattr(absorbing, "lsmr", counting_lsmr)
+    # auto uses within if it is installed, which is tested elsewhere
+    monkeypatch.setattr(absorbing, "HAVE_WITHIN", False)
     default = make_model(data, "weighted").fit()
     ncalls = len(calls)
     assert ncalls > 0

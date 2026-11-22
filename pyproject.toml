@@ -68,6 +68,10 @@ readme = "README.md"
 requires-python = ">=3.10"
 
 [project.optional-dependencies]
+within = [
+  # Fast absorption of fixed effects in AbsorbingLS
+  "within-py>=0.4.0",
+]
 test = [
   # test
   "pytest>=9,<10",
