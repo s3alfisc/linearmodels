@@ -27,6 +27,10 @@ be added to 7.1. 7.2 also contains the fixes below.
   estimators (:issue:`823`, :issue:`850`, :issue:`870`).
 - ``fit`` of ``IV2SLS`` and ``IVLIML`` decomposes the instruments once instead of three
   times (:issue:`870`).
+- ``AbsorbingLS.fit`` accepts ``method="within"``, which absorbs the variables using
+  `within <https://github.com/py-econometrics/within>`_, an optional dependency
+  (``pip install within-py``). It absorbs the same models as ``method="lsmr"``, and
+  ``absorb_options`` are passed to ``within.LsmrOptions``.
 
 .. rubric:: Changes that alter results
 

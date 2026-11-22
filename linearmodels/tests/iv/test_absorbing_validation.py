@@ -62,7 +62,9 @@ def spy_lsmr(monkeypatch):
 def test_unknown_method(data, method):
     y, x, cats = data
     mod = AbsorbingLS(y, x, absorb=cats)
-    with pytest.raises(ValueError, match=r'one of "auto", "hdfe" or "lsmr"') as info:
+    with pytest.raises(
+        ValueError, match=r'one of "auto", "hdfe", "lsmr" or "within"'
+    ) as info:
         mod.fit(method=method)
     assert repr(method) in str(info.value)
     # The model is not affected by the failed call

@@ -35,6 +35,7 @@ from numpy import (
     require,
     sqrt,
     squeeze,
+    uint32,
     unique,
     where,
     zeros,
@@ -88,6 +89,14 @@ try:
     from xxhash import xxh64
 
     HAVE_XXHASH = True
+except ImportError:
+    pass
+
+HAVE_WITHIN = False
+try:
+    import within
+
+    HAVE_WITHIN = True
 except ImportError:
     pass
 
@@ -207,13 +216,14 @@ def _check_method(method: str) -> str:
     Raises
     ------
     ValueError
-        If method is not "auto", "hdfe" or "lsmr", whatever its case
+        If method is not "auto", "hdfe", "lsmr" or "within", whatever its case
     """
-    if isinstance(method, str) and method.lower() in ("auto", "hdfe", "lsmr"):
+    methods = ("auto", "hdfe", "lsmr", "within")
+    if isinstance(method, str) and method.lower() in methods:
         return method.lower()
     raise ValueError(
-        'method must be one of "auto", "hdfe" or "lsmr", whatever its case. '
-        f"Got {method!r}."
+        'method must be one of "auto", "hdfe", "lsmr" or "within", whatever its '
+        f"case. Got {method!r}."
     )
 
 
@@ -268,8 +278,20 @@ def _check_absorb_options(options: dict[str, Any], use_hdfe: bool, method: str) 
     The algorithm depends on the method and the model, and "auto" uses HDFE if
     it can. The options of LSMR that are passed to pyhdfe.create, and the options
     of pyhdfe.create that are passed to lsmr, are a TypeError that does not
-    say why. The options of the two algorithms have different names.
+    say why. The options of the two algorithms have different names. The options
+    of within are those of within.LsmrOptions.
     """
+    if method == "within":
+        allowed = set(signature(within.LsmrOptions).parameters)
+        wrong = sorted(set(options).difference(allowed))
+        if wrong:
+            names = ", ".join(f"'{name}'" for name in wrong)
+            raise ValueError(
+                f"absorb_options contains options ({names}) that within.LsmrOptions "
+                f"does not have. The variables are absorbed using within because "
+                f'method is "within".'
+            )
+        return
     from pyhdfe import create  # noqa: PLC0415
 
     lsmr_names = set(signature(lsmr).parameters) - {"A", "b"}
@@ -382,6 +404,73 @@ def lsmr_annihilate(
         else:
             beta = lsmr(x, _y, **default_opts)[0]
             resid = y[:, i : i + 1] - x.dot(csc_array(beta[:, None])).toarray()
+            if use_cache:
+                _VARIABLE_CACHE[cache_key][variable_digest] = resid
+        resids.append(resid)
+    return column_stack(resids)
+
+
+def within_annihilate(
+    effects: list[Any],
+    y: linearmodels.typing.data.Float64Array,
+    weights: linearmodels.typing.data.Float64Array | None = None,
+    use_cache: bool = True,
+    x_hash: Hashable | None = None,
+    **within_options: Any,
+) -> linearmodels.typing.data.Float64Array:
+    r"""
+    Remove the projection of y on effects from y using within.
+
+    Parameters
+    ----------
+    effects : list of within.Effect
+        The effects, which are built by AbsorbingRegressor.within_effects.
+    y : ndarray
+        Array with shape (nobs, nvar).
+    weights : ndarray, optional
+        Observation weights with shape (nobs,). The default is to weight all
+        observations equally.
+    use_cache : bool, optional
+        Flag indicating whether results should be stored in the cache,
+        and retrieved if available. The default is True.
+    x_hash : object, optional
+        Hashable object representing the values of the effects and the weights.
+        The cache is not used if it is not provided.
+    **within_options : dict
+        Options to pass to within.LsmrOptions. The defaults are ``tol=1e-8``,
+        ``maxiter=1000`` and ``local_size=None``.
+
+    Returns
+    -------
+    ndarray
+        The residuals from the weighted regression of y on the effects, with
+        shape (nobs, nvar).
+    """
+    if y.shape[1] == 0:
+        return empty_like(y)
+    use_cache = use_cache and x_hash is not None
+    default_opts: dict[str, Any] = {"tol": 1e-8, "maxiter": 1000, "local_size": None}
+    default_opts.update(within_options)
+    cache_key = ("within", x_hash, _options_key(default_opts))
+    options = within.LsmrOptions(**default_opts)
+    solver = None
+    resids = []
+    for i in range(y.shape[1]):
+        _y = ascontiguousarray(y[:, i], dtype=float)
+
+        variable_digest = ""
+        if use_cache:
+            hasher = Hasher()
+            hasher.update(memoryview(_y.data))
+            variable_digest = hasher.hexdigest()
+
+        if use_cache and variable_digest in _VARIABLE_CACHE[cache_key]:
+            resid = _VARIABLE_CACHE[cache_key][variable_digest]
+        else:
+            if solver is None:
+                # The preconditioner is built once and used for all columns
+                solver = within.Solver(effects, weights=weights)
+            resid = solver.solve(_y, options).demeaned[:, None]
             if use_cache:
                 _VARIABLE_CACHE[cache_key][variable_digest] = resid
         resids.append(resid)
@@ -810,6 +899,22 @@ class Interaction:
 InteractionVar = Union[DataFrame, Interaction]
 
 
+def _within_effect(cat: DataFrame | None, cont: DataFrame | None) -> Any:
+    """
+    The within effect of the dummies of cat interacted with each column of cont.
+
+    The dummies use the Cartesian product of the categories. An effect without
+    cat has a single category, and an effect without cont is the dummies.
+    """
+    frame = cat if cat is not None else cont
+    assert frame is not None
+    codes = zeros(frame.shape[0], dtype=uint32)
+    if cat is not None and cat.shape[1]:
+        codes = asarray(category_product(cat).cat.codes, dtype=uint32)
+    slopes = [] if cont is None else [cont[col].to_numpy(float) for col in cont]
+    return within.Effect(codes, not slopes, slopes)
+
+
 class AbsorbingRegressor:
     """
     Construct a sparse matrix of regressors from components.
@@ -889,6 +994,18 @@ class AbsorbingRegressor:
     def regressors(self) -> csc_array:
         """Return the sparse matrix of regressors."""
         return self._regressors()
+
+    @property
+    def within_effects(self) -> list[Any]:
+        """Return the regressors as a list of within.Effect, without the weights."""
+        effects = []
+        if self._cat is not None:
+            effects = [_within_effect(self._cat[[col]], None) for col in self._cat]
+        if self._cont is not None and self._cont.shape[1] > 0:
+            effects.append(_within_effect(None, self._cont))
+        for interact in self._interactions or []:
+            effects.append(_within_effect(interact.cat, interact.cont))
+        return effects
 
     def _regressors(self) -> csc_array:
         regressors = []
@@ -1333,7 +1450,20 @@ class AbsorbingLS:
         assert isinstance(self._regressors, csc_array)
         if self._regressors.shape[1] > 0:
             _check_absorb_options(absorb_options, use_hdfe, method)
-            if use_hdfe:
+            if method == "within":
+                weights = None if weights is None else weights.ravel()
+                dep_exog = column_stack((self._dependent.ndarray, self._exog.ndarray))
+                resid = root_w * within_annihilate(
+                    areg.within_effects,
+                    dep_exog.astype(float, copy=False),
+                    weights,
+                    use_cache,
+                    self._regressors_hash,
+                    **absorb_options,
+                )
+                dep_resid = resid[:, :1]
+                exog_resid = resid[:, 1:]
+            elif use_hdfe:
                 from pyhdfe import create  # noqa: PLC0415
 
                 absorb_options["drop_singletons"] = False
@@ -1461,20 +1591,22 @@ class AbsorbingLS:
         debiased : bool, optional
             Flag indicating whether to debias the covariance estimator using
             a degree of freedom adjustment. The default is False.
-        method : {"auto", "hdfe", "lsmr"}, optional
+        method : {"auto", "hdfe", "lsmr", "within"}, optional
             The algorithm that absorbs the variables. The names are not case
             sensitive, and a ValueError is raised for any other value. One of:
 
             * "auto" - (Default). Use HDFE when applicable and fallback to LSMR.
             * "lsmr" - Force LSMR.
+            * "within" - Use within, which must be installed (``pip install
+              within-py``). It absorbs all models that LSMR absorbs.
             * "hdfe" - Force HDFE. Raises RuntimeError if the model contains
               continuous variables or continuous-binary interactions to absorb or
               if the model is weighted.
 
         absorb_options : dict, optional
-            Dictionary of options to pass to the absorber. Passed to either
-            scipy.sparse.linalg.lsmr or pyhdfe.create depending on the method used
-            to absorb the absorbed regressors. The options have to be those of
+            Dictionary of options to pass to the absorber. Passed to
+            scipy.sparse.linalg.lsmr, pyhdfe.create or within.LsmrOptions depending
+            on the method used to absorb the absorbed regressors. The options have to be those of
             the algorithm that is used, which is HDFE if method is "auto" and the
             model can be absorbed using it. A ValueError is raised for options
             of LSMR if the variables are absorbed using HDFE, and for options
@@ -1531,6 +1663,8 @@ class AbsorbingLS:
             estimator.
         RuntimeError
             If ``method`` is "hdfe" and the model cannot be absorbed using HDFE.
+        ImportError
+            If ``method`` is "within" and within is not installed.
         Exception
             An ``AbsorbingEffectError``, which is defined in
             ``linearmodels.panel.utility``, if a variable in ``exog`` is absorbed by
@@ -1603,6 +1737,8 @@ class AbsorbingLS:
         """
         check_cov_config(cov_config, cov_type, _LS_COV_KEYS, KERNEL_LOOKUP)
         method = _check_method(method)
+        if method == "within" and not HAVE_WITHIN:
+            raise ImportError('method="within" requires within: pip install within-py')
         if lsmr_options and absorb_options is None:
             # The options are options of LSMR, so they can not be passed to HDFE
             if method == "hdfe":
