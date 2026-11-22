@@ -195,10 +195,8 @@ def test_lsmr_options_and_absorb_options(data):
 
 
 @pytest.mark.parametrize("method", ["auto", "lsmr", "hdfe"])
-def test_empty_lsmr_options_do_not_select_lsmr(data, method, algorithms, monkeypatch):
-    # There are no options to pass, so the model is absorbed as without them.
-    # auto uses within if it is installed, which is tested elsewhere
-    monkeypatch.setattr(absorbing, "HAVE_WITHIN", False)
+def test_empty_lsmr_options_do_not_select_lsmr(data, method, algorithms):
+    # There are no options to pass, so the model is absorbed as without them
     mod = make_model(data)
     with pytest.warns(FutureWarning, match="lsmr_options is deprecated"):
         res = mod.fit(method=method, lsmr_options={})
